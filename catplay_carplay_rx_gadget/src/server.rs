@@ -36,6 +36,9 @@ pub struct CarPlayUsbGadget<T: AirPlayReceiverSink> {
 
     // AirPlay sink
     sink: Arc<dyn Fn() -> T + Send + Sync + 'static>,
+
+    invites_blocked: bool,
+    invite_pending: bool,
 }
 
 impl<T: AirPlayReceiverSink> CarPlayUsbGadget<T> {
@@ -64,6 +67,9 @@ impl<T: AirPlayReceiverSink> CarPlayUsbGadget<T> {
                 mfi,
 
                 sink: Arc::new(sink),
+
+                invites_blocked: false,
+                invite_pending: false,
             },
             Ok(LocalState::Initial),
         )
@@ -130,6 +136,10 @@ impl<T: AirPlayReceiverSink> CarPlayUsbGadget<T> {
         }
 
         None
+    }
+
+    pub fn set_invites_blocked(&mut self, blocked: bool) {
+        self.invites_blocked = blocked;
     }
 }
 
@@ -276,10 +286,14 @@ impl<T: AirPlayReceiverSink> Reconcilable for CarPlayUsbGadget<T> {
                     .map_err(|err| LocalError::Bonjour(err.into()))?;
                 self.server.replace(server);
 
-                LocalState::Inviting {
-                    timeout: Self::INVITE_TIMEOUT,
+                self.invite_pending = self.invites_blocked;
+                match self.invites_blocked {
+                    true => LocalState::Passive.into(),
+                    false => LocalState::Inviting {
+                        timeout: Self::INVITE_TIMEOUT,
+                    }
+                    .into(),
                 }
-                .into()
             }
             LocalState::Inviting { timeout } => {
                 if self.find_active_session().is_some() {
@@ -296,10 +310,14 @@ impl<T: AirPlayReceiverSink> Reconcilable for CarPlayUsbGadget<T> {
 
                 server.start_inviting();
 
-                LocalState::Inviting {
-                    timeout: Self::INVITE_TIMEOUT,
+                self.invite_pending = self.invites_blocked;
+                match self.invites_blocked {
+                    true => LocalState::Passive.into(),
+                    false => LocalState::Inviting {
+                        timeout: Self::INVITE_TIMEOUT,
+                    }
+                    .into(),
                 }
-                .into()
             }
             LocalState::Receiving | LocalState::Passive => {
                 let Some(server) = self.server.as_mut() else {
@@ -309,6 +327,13 @@ impl<T: AirPlayReceiverSink> Reconcilable for CarPlayUsbGadget<T> {
                 server.stop_inviting();
 
                 match self.find_active_session() {
+                    None if self.invite_pending && !self.invites_blocked => {
+                        self.invite_pending = false;
+                        LocalState::Inviting {
+                            timeout: Self::INVITE_TIMEOUT,
+                        }
+                        .into()
+                    }
                     None => LocalState::Passive.into(),
                     Some(_) => LocalState::Receiving.into(),
                 }
